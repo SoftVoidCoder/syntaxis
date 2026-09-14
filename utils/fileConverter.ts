@@ -18,9 +18,18 @@ const TEXT_LIKE_EXTENSIONS = new Set([
    'lsp', 'scr', 'dxf', 'step', 'stp', 'iges', 'igs'
 ]);
 
-const UNSUPPORTED_BINARY_ENGINEERING_EXTENSIONS = new Set([
-   'dwg'
-]);
+const DWG_VERSION_LABELS: Record<string, string> = {
+   AC1009: 'AutoCAD R12',
+   AC1012: 'AutoCAD R13',
+   AC1014: 'AutoCAD R14',
+   AC1015: 'AutoCAD 2000/2000i/2002',
+   AC1018: 'AutoCAD 2004/2005/2006',
+   AC1021: 'AutoCAD 2007/2008/2009',
+   AC1024: 'AutoCAD 2010/2011/2012',
+   AC1027: 'AutoCAD 2013/2014/2015/2016/2017',
+   AC1032: 'AutoCAD 2018/2019/2020/2021/2022/2023/2024',
+   AC1036: 'AutoCAD 2025+'
+};
 
 function getFileExtension(file: File): string {
    const match = file.name.toLowerCase().match(/\.([^.]+)$/);
@@ -34,6 +43,70 @@ function withMimeType(file: File, mimeType: string): File {
 
 function textFileFromContent(name: string, content: string): File {
    return new File([new Blob([content], { type: 'text/plain;charset=utf-8' })], `${name}.txt`, { type: 'text/plain' });
+}
+
+function decodeBytes(bytes: Uint8Array, encoding: string): string {
+   try {
+      return new TextDecoder(encoding, { fatal: false }).decode(bytes);
+   } catch {
+      return new TextDecoder('latin1', { fatal: false }).decode(bytes);
+   }
+}
+
+function extractPrintableRuns(text: string): string[] {
+   const normalized = text
+      .replace(/\u0000+/g, '\n')
+      .replace(/[\u0001-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+/g, '\n');
+
+   const matches = normalized.match(/[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9 _.,:;+\-/#№()[\]{}"'=%<>|\\@!?*&\r\n\t]{3,}/g) || [];
+
+   const seen = new Set<string>();
+   const cleaned: string[] = [];
+   for (const match of matches) {
+      const value = match.replace(/\s+/g, ' ').trim();
+      if (value.length < 4 || seen.has(value)) continue;
+      seen.add(value);
+      cleaned.push(value);
+   }
+   return cleaned;
+}
+
+function collectDwgStrings(bytes: Uint8Array): string[] {
+   const singleByteText = decodeBytes(bytes, 'windows-1251');
+   const utf16Text = decodeBytes(bytes, 'utf-16le');
+   const candidates = [...extractPrintableRuns(singleByteText), ...extractPrintableRuns(utf16Text)];
+
+   const seen = new Set<string>();
+   return candidates
+      .map(s => s.trim())
+      .filter(s => {
+         if (s.length < 4 || seen.has(s)) return false;
+         seen.add(s);
+         return true;
+      })
+      .slice(0, 400);
+}
+
+async function convertDwgToText(file: File): Promise<File> {
+   const arrayBuffer = await file.arrayBuffer();
+   const bytes = new Uint8Array(arrayBuffer);
+   const header = decodeBytes(bytes.slice(0, 6), 'latin1').replace(/\u0000/g, '').trim();
+   const versionLabel = DWG_VERSION_LABELS[header] || 'неизвестная версия DWG';
+   const strings = collectDwgStrings(bytes);
+
+   const content = [
+      `Файл "${file.name}" прочитан как бинарный CAD-чертеж DWG.`,
+      `Формат/версия: ${header || 'не определено'} (${versionLabel}).`,
+      `Размер файла: ${file.size} байт.`,
+      '',
+      'Важно: DWG является закрытым бинарным форматом, поэтому браузерное извлечение не восстанавливает полную геометрию чертежа. Ниже переданы найденные в файле читаемые строки, имена объектов, слоев, блоков, размеров или служебные маркеры, которые удалось извлечь без внешнего CAD-конвертера.',
+      '',
+      strings.length > 0
+         ? `--- НАЙДЕННЫЕ ТЕКСТОВЫЕ ДАННЫЕ (${strings.length}) ---\n${strings.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+         : 'Читаемые текстовые строки в DWG не найдены. Файл принят, но для полного анализа геометрии нужен CAD-конвертер на сервере или экспорт в DXF/PDF.'
+   ].join('\n');
+
+   return textFileFromContent(file.name, content);
 }
 
 async function getMammoth() {
@@ -161,13 +234,8 @@ export async function prepareFileForChatAttachment(file: File): Promise<File> {
       return textFileFromContent(file.name, text || '(Empty text file)');
    }
 
-   if (UNSUPPORTED_BINARY_ENGINEERING_EXTENSIONS.has(ext)) {
-      return textFileFromContent(file.name, [
-         `Файл "${file.name}" приложен к запросу.`,
-         'Это бинарный CAD-чертеж DWG. Gemini не может напрямую прочитать геометрию DWG через чат-вложение.',
-         'Файл принят без ошибки, но для анализа чертежа попроси пользователя экспортировать его в PDF или DXF.',
-         `Размер файла: ${file.size} байт.`
-      ].join('\n'));
+   if (ext === 'dwg') {
+      return convertDwgToText(file);
    }
 
    if (ext === 'pdf' && !file.type) {
@@ -182,7 +250,8 @@ export async function prepareFileForChatAttachment(file: File): Promise<File> {
  * Returns the text content as a string.
  */
 export async function extractTextFromOfficeFile(file: File): Promise<string> {
-   const textFile = await convertOfficeFileToText(file);
+   const ext = getFileExtension(file);
+   const textFile = ext === 'dwg' ? await convertDwgToText(file) : await convertOfficeFileToText(file);
    if (textFile === file) {
       // Not converted — try reading as text
       return await file.text();
