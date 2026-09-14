@@ -10,7 +10,7 @@ import { useAuth } from '../context/AuthContext';
 import { SalesModeBlocker } from '../components/SalesModeBlocker';
 import { ChatMessageBubble } from '../components/ChatMessageBubble';
 import { useToolExecution } from '../hooks/useToolExecution';
-import { prepareFileForChatAttachment } from '../utils/fileConverter';
+import { prepareFilesForChatAttachment } from '../utils/fileConverter';
 import {
   DEFAULT_SALES_PROMPT, DEFAULT_TRAINING_PROMPT, DEFAULT_CALCULATION_PROMPT,
   DEFAULT_ANALYTICS_PROMPT, DEFAULT_DEEP_RESEARCH_PROMPT, DEFAULT_FREE_PROMPT,
@@ -307,6 +307,17 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, onUpdateMess
     }
   };
 
+  const addPreparedFileAsAttachment = async (file: File, target: Attachment[]) => {
+    if (file.type === 'text/plain' || file.type.startsWith('text/')) {
+      const text = await file.text();
+      target.push({ name: file.name, mimeType: 'application/x-korda-text', data: text });
+      return;
+    }
+
+    const { uri, name, mimeType } = await uploadFileToGemini(file);
+    target.push({ name, mimeType, data: '', fileUri: uri });
+  };
+
   const handleSendMessage = async () => {
     if ((!inputText.trim() && attachments.length === 0) || isProcessing) return;
 
@@ -350,10 +361,11 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, onUpdateMess
         try {
           setUploadProgress({ current: i + 1, total: files.length });
 
-          file = await prepareFileForChatAttachment(file);
+          const preparedFiles = await prepareFilesForChatAttachment(file);
 
-          const { uri, name, mimeType } = await uploadFileToGemini(file);
-          newAttachments.push({ name, mimeType, data: '', fileUri: uri });
+          for (const preparedFile of preparedFiles) {
+            await addPreparedFileAsAttachment(preparedFile, newAttachments);
+          }
         } catch (err) {
           console.error(`Failed to process/upload ${file.name}`, err);
           hasErrors = true;
@@ -417,9 +429,10 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, onUpdateMess
       let file = fileArray[i];
       try {
         setUploadProgress({ current: i + 1, total: fileArray.length });
-        file = await prepareFileForChatAttachment(file);
-        const { uri, name, mimeType } = await uploadFileToGemini(file);
-        newAttachments.push({ name, mimeType, data: '', fileUri: uri });
+        const preparedFiles = await prepareFilesForChatAttachment(file);
+        for (const preparedFile of preparedFiles) {
+          await addPreparedFileAsAttachment(preparedFile, newAttachments);
+        }
       } catch (err) {
         console.error(`Failed to process/upload ${file.name}`, err);
         hasErrors = true;

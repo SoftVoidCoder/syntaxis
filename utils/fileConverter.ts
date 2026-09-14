@@ -45,6 +45,10 @@ function textFileFromContent(name: string, content: string): File {
    return new File([new Blob([content], { type: 'text/plain;charset=utf-8' })], `${name}.txt`, { type: 'text/plain' });
 }
 
+function fileBaseName(name: string): string {
+   return name.replace(/\.[^.]+$/, '') || name;
+}
+
 function decodeBytes(bytes: Uint8Array, encoding: string): string {
    try {
       return new TextDecoder(encoding, { fatal: false }).decode(bytes);
@@ -87,9 +91,59 @@ function collectDwgStrings(bytes: Uint8Array): string[] {
       .slice(0, 400);
 }
 
-async function convertDwgToText(file: File): Promise<File> {
-   const arrayBuffer = await file.arrayBuffer();
-   const bytes = new Uint8Array(arrayBuffer);
+function findPngEnd(bytes: Uint8Array, start: number): number | null {
+   let offset = start + 8;
+   while (offset + 12 <= bytes.length) {
+      const length =
+         (bytes[offset] << 24) |
+         (bytes[offset + 1] << 16) |
+         (bytes[offset + 2] << 8) |
+         bytes[offset + 3];
+      if (length < 0 || offset + 12 + length > bytes.length) return null;
+
+      const type = String.fromCharCode(
+         bytes[offset + 4],
+         bytes[offset + 5],
+         bytes[offset + 6],
+         bytes[offset + 7]
+      );
+      offset += 12 + length;
+      if (type === 'IEND') return offset;
+   }
+   return null;
+}
+
+function extractEmbeddedPngs(bytes: Uint8Array, sourceName: string): File[] {
+   const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+   const files: File[] = [];
+
+   for (let i = 0; i <= bytes.length - signature.length; i++) {
+      let isPng = true;
+      for (let j = 0; j < signature.length; j++) {
+         if (bytes[i + j] !== signature[j]) {
+            isPng = false;
+            break;
+         }
+      }
+      if (!isPng) continue;
+
+      const end = findPngEnd(bytes, i);
+      if (!end) continue;
+
+      const pngBytes = bytes.slice(i, end);
+      files.push(new File(
+         [new Blob([pngBytes], { type: 'image/png' })],
+         `${fileBaseName(sourceName)}-dwg-preview-${files.length + 1}.png`,
+         { type: 'image/png' }
+      ));
+
+      i = end - 1;
+   }
+
+   return files.slice(0, 3);
+}
+
+function convertDwgBytesToText(file: File, bytes: Uint8Array, previewCount: number): File {
    const header = decodeBytes(bytes.slice(0, 6), 'latin1').replace(/\u0000/g, '').trim();
    const versionLabel = DWG_VERSION_LABELS[header] || 'неизвестная версия DWG';
    const strings = collectDwgStrings(bytes);
@@ -98,15 +152,32 @@ async function convertDwgToText(file: File): Promise<File> {
       `Файл "${file.name}" прочитан как бинарный CAD-чертеж DWG.`,
       `Формат/версия: ${header || 'не определено'} (${versionLabel}).`,
       `Размер файла: ${file.size} байт.`,
+      previewCount > 0
+         ? `Из DWG извлечено встроенное изображение предпросмотра: ${previewCount} шт. Оно приложено отдельным image/png файлом рядом с этим отчетом.`
+         : 'Встроенное изображение предпросмотра в DWG не найдено.',
       '',
-      'Важно: DWG является закрытым бинарным форматом, поэтому браузерное извлечение не восстанавливает полную геометрию чертежа. Ниже переданы найденные в файле читаемые строки, имена объектов, слоев, блоков, размеров или служебные маркеры, которые удалось извлечь без внешнего CAD-конвертера.',
+      'Используй этот отчет и изображение предпросмотра как данные для анализа. Не отвечай, что файл не прочитан: он обработан в доступном для браузера режиме. Если для расчета не хватает точной векторной геометрии, перечисли, каких размеров или обозначений не хватает, но сначала проанализируй уже извлеченные данные.',
       '',
       strings.length > 0
          ? `--- НАЙДЕННЫЕ ТЕКСТОВЫЕ ДАННЫЕ (${strings.length}) ---\n${strings.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
-         : 'Читаемые текстовые строки в DWG не найдены. Файл принят, но для полного анализа геометрии нужен CAD-конвертер на сервере или экспорт в DXF/PDF.'
+         : 'Читаемые текстовые строки в DWG не найдены.'
    ].join('\n');
 
    return textFileFromContent(file.name, content);
+}
+
+async function convertDwgToText(file: File): Promise<File> {
+   const arrayBuffer = await file.arrayBuffer();
+   const bytes = new Uint8Array(arrayBuffer);
+   const previews = extractEmbeddedPngs(bytes, file.name);
+   return convertDwgBytesToText(file, bytes, previews.length);
+}
+
+async function convertDwgToChatFiles(file: File): Promise<File[]> {
+   const arrayBuffer = await file.arrayBuffer();
+   const bytes = new Uint8Array(arrayBuffer);
+   const previews = extractEmbeddedPngs(bytes, file.name);
+   return [convertDwgBytesToText(file, bytes, previews.length), ...previews];
 }
 
 async function getMammoth() {
@@ -243,6 +314,14 @@ export async function prepareFileForChatAttachment(file: File): Promise<File> {
    }
 
    return file.type ? file : withMimeType(file, 'application/octet-stream');
+}
+
+export async function prepareFilesForChatAttachment(file: File): Promise<File[]> {
+   const ext = getFileExtension(file);
+   if (ext === 'dwg') {
+      return convertDwgToChatFiles(file);
+   }
+   return [await prepareFileForChatAttachment(file)];
 }
 
 /**

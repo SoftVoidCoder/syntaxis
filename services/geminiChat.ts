@@ -382,6 +382,28 @@ ${foundSnippets || '(ничего не найдено)'}
     let finalPrompt = text;
     const parts: any[] = [];
     if (includeFileAttachments && atts && atts.length > 0) {
+      const hasDwgReport = atts.some(att =>
+        att.mimeType === 'application/x-korda-text' &&
+        /CAD-чертеж DWG|Формат\/версия: AC10/i.test(att.data || '')
+      );
+      const hasDwgPreview = atts.some(att => /-dwg-preview-\d+\.png$/i.test(att.name || ''));
+      const hasLspSource = atts.some(att =>
+        att.mimeType === 'application/x-korda-text' &&
+        /\.lsp(?:\.txt)?$/i.test(att.name || '')
+      );
+
+      if (hasDwgReport) {
+        finalPrompt += '\n\n[СИСТЕМНОЕ ПРАВИЛО ПО DWG]\n';
+        finalPrompt += hasDwgPreview
+          ? 'DWG уже обработан: есть текстовый отчет и изображение предпросмотра. Проанализируй их как содержимое чертежа. Не отвечай шаблоном "не могу открыть DWG" и не проси PDF/DXF как основной ответ.\n'
+          : 'DWG уже обработан в доступном режиме. Проанализируй извлеченные данные. Не отвечай шаблоном "не могу открыть DWG"; если данных мало, сначала перечисли, что удалось понять.\n';
+      }
+
+      if (hasLspSource) {
+        finalPrompt += '\n\n[СИСТЕМНОЕ ПРАВИЛО ПО LSP]\n';
+        finalPrompt += 'AutoLISP-файл уже прочитан как исходный код. Анализируй функции, команды, параметры, логику AutoCAD и возможные ошибки в коде. Не проси пользователя переслать файл в другом формате.\n';
+      }
+
       atts.forEach(att => {
         if (att.mimeType === 'application/x-korda-text') {
           finalPrompt += `\n\n--- СОДЕРЖИМОЕ ФАЙЛА (${att.name}) ---\n`;
