@@ -57,20 +57,16 @@ const mapConveyorFilesToAttachments = (files?: ConveyorFile[]): Attachment[] => 
             attachments.push({ name: f.name, mimeType: 'application/x-korda-text', data: f.extractedText });
             return;
         }
-        
-        // Skip DOCX and XLSX if we didn't extract text (to prevent Gemini crash due to unsupported MIME types)
-        const nameLower = f.name.toLowerCase();
-        if (f.mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
-            f.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-            nameLower.endsWith('.docx') || nameLower.endsWith('.xlsx') || nameLower.endsWith('.xls')) {
-            return;
-        }
 
         attachments.push({
-            name: f.name,
-            mimeType: f.mimeType,
-            data: '',
-            fileUri: f.gsUri
+            name: `${f.name}.txt`,
+            mimeType: 'application/x-korda-text',
+            data: [
+                `Файл "${f.name}" приложен к заявке.`,
+                `Тип: ${f.mimeType || 'unknown'}. Размер: ${Math.round((f.size || 0) / 1024)} KB.`,
+                'Содержимое не было извлечено в текст, поэтому не передавай этот файл как прочитанный.',
+                'Если нужен анализ чертежа или PDF, попроси экспортировать читаемую версию или загрузить файл напрямую в чат.'
+            ].join('\n')
         });
     });
     return attachments;

@@ -10,7 +10,7 @@ import { useAuth } from '../context/AuthContext';
 import { SalesModeBlocker } from '../components/SalesModeBlocker';
 import { ChatMessageBubble } from '../components/ChatMessageBubble';
 import { useToolExecution } from '../hooks/useToolExecution';
-import { isOfficeFile, convertOfficeFileToText } from '../utils/fileConverter';
+import { prepareFileForChatAttachment } from '../utils/fileConverter';
 import {
   DEFAULT_SALES_PROMPT, DEFAULT_TRAINING_PROMPT, DEFAULT_CALCULATION_PROMPT,
   DEFAULT_ANALYTICS_PROMPT, DEFAULT_DEEP_RESEARCH_PROMPT, DEFAULT_FREE_PROMPT,
@@ -332,11 +332,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, onUpdateMess
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const files = Array.from(e.target.files);
-      if (files.some(f => f.name.toLowerCase().endsWith('.doc') || f.type === 'application/msword')) {
-        alert("Файлы старого формата .doc не поддерживаются. Пожалуйста, пересохраните их в формате .docx или .pdf перед загрузкой.");
-        if (fileInputRef.current) fileInputRef.current.value = '';
-        return;
-      }
 
       const limit = (chat.mode === ChatMode.DEEP_RESEARCH || chat.mode === ChatMode.ANALYTICS) ? 500 : 50;
 
@@ -355,10 +350,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, onUpdateMess
         try {
           setUploadProgress({ current: i + 1, total: files.length });
 
-          // Convert Office files to text using shared utility
-          if (isOfficeFile(file)) {
-            file = await convertOfficeFileToText(file);
-          }
+          file = await prepareFileForChatAttachment(file);
 
           const { uri, name, mimeType } = await uploadFileToGemini(file);
           newAttachments.push({ name, mimeType, data: '', fileUri: uri });
@@ -411,10 +403,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, onUpdateMess
     if (!files || files.length === 0) return;
 
     const fileArray = Array.from(files);
-    if (fileArray.some(f => f.name.toLowerCase().endsWith('.doc') || f.type === 'application/msword')) {
-      alert("Файлы старого формата .doc не поддерживаются. Пожалуйста, пересохраните их в формате .docx или .pdf перед загрузкой.");
-      return;
-    }
 
     const limit = (chat.mode === ChatMode.DEEP_RESEARCH || chat.mode === ChatMode.ANALYTICS) ? 500 : 50;
     if (attachments.length + files.length > limit) {
@@ -429,9 +417,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, onUpdateMess
       let file = fileArray[i];
       try {
         setUploadProgress({ current: i + 1, total: fileArray.length });
-        if (isOfficeFile(file)) {
-          file = await convertOfficeFileToText(file);
-        }
+        file = await prepareFileForChatAttachment(file);
         const { uri, name, mimeType } = await uploadFileToGemini(file);
         newAttachments.push({ name, mimeType, data: '', fileUri: uri });
       } catch (err) {

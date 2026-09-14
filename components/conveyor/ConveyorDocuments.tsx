@@ -52,12 +52,6 @@ export const ConveyorDocuments: React.FC<ConveyorDocumentsProps> = ({ request, o
     const handleUpload = async (inputFiles: FileList | File[]) => {
         if (!user) return;
         const fileArray = Array.from(inputFiles);
-        
-        if (fileArray.some(f => f.name.toLowerCase().endsWith('.doc') || f.type === 'application/msword')) {
-            alert("Файлы старого формата .doc не поддерживаются искусственным интеллектом. Пожалуйста, пересохраните файл в формате .docx или .pdf.");
-            if (fileInputRef.current) fileInputRef.current.value = '';
-            return;
-        }
 
         setIsUploading(true);
         setUploadProgress({ current: 0, total: fileArray.length });

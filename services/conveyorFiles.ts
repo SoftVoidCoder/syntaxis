@@ -4,7 +4,7 @@
  */
 import { ConveyorFile } from '../types';
 import { callProxy } from './geminiCore';
-import { isOfficeFile, extractTextFromOfficeFile } from '../utils/fileConverter';
+import { extractTextFromOfficeFile, prepareFileForChatAttachment } from '../utils/fileConverter';
 
 /** Upload a file to permanent conveyor storage */
 export async function uploadConveyorFile(
@@ -20,18 +20,17 @@ export async function uploadConveyorFile(
     return new Promise(async (resolve, reject) => {
         let extractedText: string | undefined;
 
-        // Try to extract text for Office files (DOCX, XLSX, etc.)
-        if (isOfficeFile(file)) {
+        try {
+            const preparedFile = await prepareFileForChatAttachment(file);
+            if (preparedFile.type === 'text/plain' && preparedFile.name !== file.name) {
+                extractedText = await preparedFile.text();
+                console.log(`[ConveyorFile] Extracted ${extractedText?.length || 0} characters from ${file.name}`);
+            }
+        } catch (err) {
+            console.warn("[ConveyorFile] Text extraction failed:", err);
             try {
                 extractedText = await extractTextFromOfficeFile(file);
-                if (extractedText === await file.text()) {
-                    extractedText = undefined; // if it wasn't actually converted, ignore it
-                } else {
-                    console.log(`[ConveyorFile] Extracted ${extractedText?.length || 0} characters from Office file`);
-                }
-            } catch (err) {
-                console.warn("[ConveyorFile] Office extraction failed:", err);
-            }
+            } catch {}
         }
 
         const reader = new FileReader();
