@@ -83,6 +83,32 @@ function runWithAiLimit(fn) {
     });
 }
 
+function findGcsFileReference(value, path = 'payload') {
+    if (!value || typeof value !== 'object') return null;
+    if (Array.isArray(value)) {
+        for (let i = 0; i < value.length; i++) {
+            const found = findGcsFileReference(value[i], `${path}[${i}]`);
+            if (found) return found;
+        }
+        return null;
+    }
+    if (typeof value.fileUri === 'string' && value.fileUri.startsWith('gs://')) {
+        return `${path}.fileUri`;
+    }
+    for (const [key, child] of Object.entries(value)) {
+        const found = findGcsFileReference(child, `${path}.${key}`);
+        if (found) return found;
+    }
+    return null;
+}
+
+function hasFileReference(value) {
+    if (!value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some(item => hasFileReference(item));
+    if (typeof value.fileUri === 'string') return true;
+    return Object.values(value).some(child => hasFileReference(child));
+}
+
 // Retry wrapper for transient 500 and 429 errors
 async function withRetry(fn, maxRetries = 2) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -137,6 +163,7 @@ async function generateWithFallback(ai, model, contents, config, timeout = 60000
 
 async function generateWithKeyPool(aiClients, model, contents, config, timeout = 600000) {
     let lastError;
+    const requestHasFileReference = hasFileReference(contents);
     for (let index = 0; index < aiClients.length; index++) {
         try {
             return await generateWithFallback(aiClients[index], model, contents, config, timeout);
@@ -160,7 +187,8 @@ async function generateWithKeyPool(aiClients, model, contents, config, timeout =
                 }
             }
             const rotate = error?.status === 401 || error?.status === 403 || error?.status === 429 || error?.status === 503 ||
-                /API key|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand/i.test(error?.message || '');
+                /API key|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand/i.test(error?.message || '') ||
+                (requestHasFileReference && error?.status === 400 && /file|FileService|not found|permission|PERMISSION_DENIED|INVALID_ARGUMENT/i.test(error?.message || ''));
             if (!rotate || index === aiClients.length - 1) throw error;
             console.warn(`[Proxy] Chat key ${index + 1} unavailable (${error?.status || 'error'}); rotating key`);
         }
@@ -299,6 +327,12 @@ export default async function handler(req, res) {
             // Sync (Legacy/Direct) — with concurrency limit + retry
             const { model, contents, config, knowledgeBaseText } = payload;
             console.log(`[Proxy] Sync generateContent (active: ${activeAiCalls}/${MAX_CONCURRENT_AI}, queued: ${aiQueue.length})`);
+            const gcsReferencePath = findGcsFileReference(contents, 'payload.contents');
+            if (gcsReferencePath) {
+                return res.status(400).json({
+                    error: `Неподдерживаемое вложение: ${gcsReferencePath} содержит gs:// ссылку. Текущий Gemini API по ключу не принимает Google Cloud Storage URI напрямую; файл нужно отправлять inline или регистрировать через Gemini File API.`
+                });
+            }
 
             // --- KB CACHING: cache knowledge base if provided and large enough ---
             let cachedContentName = null;
@@ -400,6 +434,12 @@ export default async function handler(req, res) {
             const jobId = crypto.randomUUID();
 
             console.log(`[Proxy] Starting Async Job ${jobId} (LeadGen)...`);
+            const gcsReferencePath = findGcsFileReference(contents, 'payload.contents');
+            if (gcsReferencePath) {
+                return res.status(400).json({
+                    error: `Неподдерживаемое вложение: ${gcsReferencePath} содержит gs:// ссылку. Текущий Gemini API по ключу не принимает Google Cloud Storage URI напрямую; файл нужно отправлять inline или регистрировать через Gemini File API.`
+                });
+            }
 
             // --- KB CACHING: cache knowledge base if provided and large enough ---
             let cachedContentName = null;
@@ -1120,34 +1160,62 @@ export default async function handler(req, res) {
         } else if (action === 'uploadFile') {
             const { fileData, mimeType, displayName } = payload;
 
-            // Vertex AI does NOT support ai.files.upload(). Use GCS bucket instead.
-            // Upload file to Firebase Storage (GCS), then pass gs:// URI to Gemini.
+            // The Gemini Developer API does not accept raw gs:// references.
+            // Register chat attachments with the Gemini Files API and pass the
+            // returned file URI to generateContent.
             try {
-                const { getStorage } = await import('firebase-admin/storage');
-                const bucket = getStorage().bucket();
+                if (!geminiApiKey) {
+                    throw new Error('GEMINI_API_KEY or GEMINI_CHAT_API_KEYS is required for file uploads');
+                }
+
+                const fs = await import('fs/promises');
+                const os = await import('os');
+                const path = await import('path');
                 const buffer = Buffer.from(fileData, 'base64');
-                const ext = (mimeType.split('/')[1] || 'bin').replace('plain', 'txt');
-                const gcsPath = `gemini-uploads/${crypto.randomUUID()}.${ext}`;
-                const file = bucket.file(gcsPath);
+                const ext = (mimeType?.split('/')[1] || 'bin').replace('plain', 'txt').replace(/[^a-zA-Z0-9]/g, '');
+                const tempPath = path.join(os.tmpdir(), `gemini-upload-${crypto.randomUUID()}.${ext || 'bin'}`);
+                await fs.writeFile(tempPath, buffer);
 
-                await file.save(buffer, {
-                    metadata: {
-                        contentType: mimeType,
-                        metadata: { originalName: displayName }
+                try {
+                    const uploadedFile = await ai.files.upload({
+                        file: tempPath,
+                        config: {
+                            mimeType,
+                            mime_type: mimeType,
+                            displayName: displayName || 'attachment',
+                            display_name: displayName || 'attachment'
+                        }
+                    });
+
+                    let fileInfo = uploadedFile;
+                    for (let i = 0; i < 30 && fileInfo?.state === 'PROCESSING'; i++) {
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        fileInfo = await ai.files.get({ name: uploadedFile.name });
                     }
-                });
 
-                const gsUri = `gs://${bucket.name}/${gcsPath}`;
-                console.log(`[Proxy] File uploaded to GCS: ${gsUri} (${displayName}, ${buffer.length} bytes)`);
+                    if (fileInfo?.state === 'FAILED') {
+                        throw new Error(`Gemini File API failed to process ${displayName || 'attachment'}`);
+                    }
 
-                result = {
-                    fileUri: gsUri,
-                    name: gcsPath,
-                    mimeType: mimeType
-                };
+                    const fileUri = fileInfo?.uri || uploadedFile.uri;
+                    const resolvedMimeType = fileInfo?.mimeType || fileInfo?.mime_type || uploadedFile.mimeType || uploadedFile.mime_type || mimeType;
+                    if (!fileUri) {
+                        throw new Error('Gemini File API did not return a file URI');
+                    }
+
+                    console.log(`[Proxy] File uploaded to Gemini Files API: ${fileUri} (${displayName}, ${buffer.length} bytes)`);
+
+                    result = {
+                        fileUri,
+                        name: fileInfo?.name || uploadedFile.name || displayName,
+                        mimeType: resolvedMimeType
+                    };
+                } finally {
+                    await fs.unlink(tempPath).catch(() => {});
+                }
             } catch (err) {
-                console.error("GCS Upload Failed:", err);
-                throw new Error("Failed to upload file to GCS: " + err.message);
+                console.error("Gemini File Upload Failed:", err);
+                throw new Error("Failed to upload file to Gemini Files API: " + err.message);
             }
 
         } else if (action === 'uploadConveyorFile') {

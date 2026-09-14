@@ -2,6 +2,16 @@
 import { STORAGE_KEYS, DEFAULT_SALES_PROMPT, DEFAULT_TRAINING_PROMPT, DEFAULT_CALCULATION_PROMPT, DEFAULT_WELCOME_MESSAGES, DEFAULT_ANALYTICS_PROMPT, DEFAULT_KNOWLEDGE_PROMPT, DEFAULT_CONVEYOR_PROMPT } from "../constants";
 import { User, ChatSession, KnowledgeFile, UserRole, ModePrompts, QuizDefinition, QuizSession, KnowledgeCategory, QuickPrompt, UserUsageStats, ChatMode, MonthlyStats } from "../types";
 
+const isStorageQuotaError = (error: unknown): boolean => {
+  if (!(error instanceof DOMException)) return false;
+  return (
+    error.name === 'QuotaExceededError' ||
+    error.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    error.code === 22 ||
+    error.code === 1014
+  );
+};
+
 // --- Users ---
 export const getUsers = (): User[] => {
   const data = localStorage.getItem(STORAGE_KEYS.USERS);
@@ -108,7 +118,12 @@ export const trackChatRequest = (userId: string, mode: ChatMode) => {
     mStats.chatRequests[mode] = (mStats.chatRequests[mode] || 0) + 1;
   }
 
-  localStorage.setItem(STORAGE_KEYS.ANALYTICS, JSON.stringify(allStats));
+  try {
+    localStorage.setItem(STORAGE_KEYS.ANALYTICS, JSON.stringify(allStats));
+  } catch (error) {
+    if (!isStorageQuotaError(error)) throw error;
+    console.warn('[Storage] Analytics cache quota exceeded. Skipping local analytics update.', error);
+  }
 };
 
 export const trackImageGeneration = (userId: string) => {
@@ -148,6 +163,22 @@ export const trackVideoGeneration = (userId: string) => {
 };
 
 // --- Chats ---
+const compactChatsForLocalCache = (chats: ChatSession[]): ChatSession[] => {
+  return chats.slice(0, 30).map(chat => ({
+    ...chat,
+    messages: chat.messages.slice(-80).map(message => ({
+      ...message,
+      text: message.text.length > 20000 ? `${message.text.slice(0, 20000)}\n\n[Ответ был сокращен в локальном кэше браузера.]` : message.text,
+      attachments: message.attachments?.map(attachment => ({
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        fileUri: attachment.fileUri,
+        data: ''
+      }))
+    }))
+  }));
+};
+
 export const getChats = (userId: string): ChatSession[] => {
   const allChatsRaw = localStorage.getItem(STORAGE_KEYS.CHATS);
   if (!allChatsRaw) return [];
@@ -159,7 +190,21 @@ export const saveUserChats = (userId: string, chats: ChatSession[]) => {
   const allChatsRaw = localStorage.getItem(STORAGE_KEYS.CHATS);
   let allChats: Record<string, ChatSession[]> = allChatsRaw ? JSON.parse(allChatsRaw) : {};
   allChats[userId] = chats;
-  localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(allChats));
+  try {
+    localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(allChats));
+  } catch (error) {
+    if (!isStorageQuotaError(error)) throw error;
+
+    console.warn('[Storage] Browser chat cache quota exceeded. Saving compact local cache instead.', error);
+    try {
+      allChats = { [userId]: compactChatsForLocalCache(chats) };
+      localStorage.setItem(STORAGE_KEYS.CHATS, JSON.stringify(allChats));
+    } catch (fallbackError) {
+      if (!isStorageQuotaError(fallbackError)) throw fallbackError;
+      console.warn('[Storage] Compact chat cache still exceeds quota. Clearing local chat cache; cloud sync remains active.', fallbackError);
+      localStorage.removeItem(STORAGE_KEYS.CHATS);
+    }
+  }
 };
 
 // --- Knowledge Base ---

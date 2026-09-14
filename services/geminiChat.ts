@@ -378,10 +378,10 @@ ${foundSnippets || '(ничего не найдено)'}
     });
   }
 
-  const processMessageParts = (text: string, atts?: Attachment[]) => {
+  const processMessageParts = (text: string, atts?: Attachment[], includeFileAttachments = true) => {
     let finalPrompt = text;
     const parts: any[] = [];
-    if (atts && atts.length > 0) {
+    if (includeFileAttachments && atts && atts.length > 0) {
       atts.forEach(att => {
         if (att.mimeType === 'application/x-korda-text') {
           finalPrompt += `\n\n--- СОДЕРЖИМОЕ ФАЙЛА (${att.name}) ---\n${att.data}\n--- КОНЕЦ ФАЙЛА ---\n`;
@@ -410,7 +410,7 @@ ${foundSnippets || '(ничего не найдено)'}
 
   let contents = relevantHistory.map(msg => ({
     role: msg.role === 'system' ? 'user' : msg.role,
-    parts: processMessageParts(msg.text, msg.attachments)
+    parts: processMessageParts(msg.text, msg.attachments, false)
   })).filter(msg => msg.parts.length > 0);
 
   const currentPromptParts = processMessageParts(currentPrompt, attachments);
